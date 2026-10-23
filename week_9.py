@@ -43,7 +43,7 @@ from gpytorch.kernels import MaternKernel, ScaleKernel, RBFKernel
 from gpytorch.constraints import Interval
 from botorch.generation import MaxPosteriorSampling  # Thompson Sampling — F4, F6
 
-WEEK_NO = 11
+WEEK_NO = 12
 
 # Select the function number from command line argument
 FUNCTION_NO = int(sys.argv[1]) if len(sys.argv) > 1 else 1
