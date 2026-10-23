@@ -1,0 +1,260 @@
+# Black-Box Optimisation (BBO) Capstone Project
+
+**Imperial College Business School — Executive Education**
+**Repository:** [andreia-bs/Capstone-project](https://github.com/andreia-bs/Capstone-project/tree/main)
+
+---
+
+## Non-Technical Explanation of the Project
+
+Imagine trying to find the best recipe for eight different cakes simultaneously,
+but you can only bake one cake per function per week and cannot see the recipe —
+only taste the result. Each week, a mathematical model learns from every previous
+result to make a smarter guess about where the best outcome might be hiding. This
+project does exactly that for eight unknown mathematical functions, each
+representing a real-world challenge: detecting a contamination source, minimising
+drug side effects, maximising chemical yield, or tuning a machine learning model.
+Over thirteen rounds, seven of the eight functions improved substantially — one by
+more than 134 times its starting value — demonstrating that systematic,
+model-guided search finds better solutions faster than trial and error alone.
+
+---
+
+## Data
+
+### Source
+
+The dataset consists of two components per function:
+
+1. **Initial data** — provided by the capstone project portal at the start of
+   Module 12. Stored as NumPy `.npy` files:
+   - `initial_data/function_{1-8}/initial_inputs.npy`
+   - `initial_data/function_{1-8}/initial_outputs.npy`
+
+2. **Weekly query history** — one input and one output added per function per
+   module, stored as plain-text files:
+   - `week{1-13}_inputs.txt` — one line per function, hyphen-separated values
+   - `week{1-13}_outputs.txt` — one scalar per function per line
+
+### Dataset Characteristics
+
+| Function | Input Dimensions | Initial Points | Total Points (W13) | Output Type |
+|----------|-----------------|----------------|--------------------|-------------|
+| F1 | 2D | 10 | 23 | Tiny positive (near-zero) |
+| F2 | 2D | 10 | 23 | Moderate positive |
+| F3 | 3D | 15 | 28 | Negative (penalty) |
+| F4 | 4D | 30 | 43 | Negative → positive |
+| F5 | 4D | 20 | 33 | Large positive |
+| F6 | 5D | 20 | 33 | Negative (penalty) |
+| F7 | 6D | 30 | 43 | Moderate positive |
+| F8 | 8D | 40 | 53 | Moderate positive |
+
+All inputs are constrained to $[0, 1]^N$. All outputs are scalar real values.
+The functions are deterministic — querying the same point twice returns the
+same output.
+
+### Data Format Example
+
+```
+# week1_inputs.txt (one line per function, hyphen-separated, 6 decimal places)
+0.702706-0.714983
+0.696000-0.949000
+0.535588-0.657010-0.184434
+0.399925-0.406128-0.448374-0.152257
+...
+
+# week1_outputs.txt (one scalar per function)
+1.810006997875250620e-9
+0.582268900761512200
+-0.114245289280469480
+-4.443916226662012000
+...
+```
+
+### Citations
+
+- Brochu, E., Cora, V. M., & de Freitas, N. (2010). *A Tutorial on Bayesian
+  Optimization of Expensive Black-Box Functions*. arXiv:1012.2599.
+- Rasmussen, C. E., & Williams, C. K. I. (2006). *Gaussian Processes for
+  Machine Learning*. MIT Press.
+- Srinivas, N., Krause, A., Kakade, S., & Seeger, M. (2010). Gaussian Process
+  Optimization in the Bandit Setting. *ICML 2010*.
+
+---
+
+## Model
+
+### Gaussian Process Surrogate with Bespoke Acquisition Functions
+
+The core model is a **Gaussian Process (GP) surrogate** implemented via
+[BoTorch](https://botorch.org/) and [GPyTorch](https://gpytorch.ai/). The GP
+acts as a probabilistic map of each unknown function: given all accumulated
+input-output pairs, it predicts both the expected output (posterior mean
+$$\mu(x)$$) and the uncertainty (posterior standard deviation $$\sigma(x)$$)
+at any untested point.
+
+### Why a GP Surrogate?
+
+A GP was chosen over alternatives (neural networks, random forests) for three
+reasons specific to this problem:
+
+1. **Small data regime:** With 10–53 points per function, a GP provides
+   calibrated uncertainty estimates without overfitting — a neural network
+   would have more parameters than data points.
+2. **Principled uncertainty quantification:** The posterior standard deviation
+   $$\sigma(x)$$ directly drives the acquisition function, enabling formal
+   exploration-exploitation balance.
+3. **Kernel flexibility:** The Matérn ARD kernel automatically learns which
+   input dimensions are most influential (Automatic Relevance Determination),
+   replacing manual correlation analysis.
+
+### Kernel Configuration
+
+Each function uses a `ScaleKernel(MaternKernel(nu, ard_num_dims))` with
+function-specific smoothness parameter $$\nu$$ and length-scale bounds:
+
+| Function | $$\nu$$ | Length-scale bounds | Rationale |
+|----------|---------|---------------------|-----------|
+| F1 | 1.5 | (0.005, 0.05) | Near-singular peak — very tight |
+| F2 | 1.5 | (0.05, 0.5) | Moderate sharpness |
+| F3 | 2.5 | (0.1, 1.0) | Smooth response surface |
+| F4 | 1.5 | (0.05, 0.5) | Jagged landscape |
+| F5 | 2.5 | (0.1, 1.5) | Smooth, large space |
+| F6 | 2.5 | (0.05, 0.75) | Moderate multi-dim |
+| F7 | 2.5 | (0.05, 1.0) | HP tuning — ARD critical |
+| F8 | 2.5 | (0.05, 1.0) | 8D — TuRBO manages locality |
+
+All GPs use the `Standardize` outcome transform (zero-mean normalisation),
+which is critical for functions with all-negative outputs (F3, F6) where an
+unnormalised GP would incorrectly treat unexplored regions as better than
+observed ones.
+
+### References
+
+- Balandat, M., et al. (2020). BoTorch: A Framework for Efficient Monte-Carlo
+  Bayesian Optimization. *NeurIPS 2020*.
+- Eriksson, D., et al. (2019). Scalable Global Optimization via Local Bayesian
+  Optimization (TuRBO). *NeurIPS 2019*.
+- Hennig, P., & Schuler, C. J. (2012). Entropy Search for Information-Efficient
+  Global Optimization. *JMLR 13*, 1809–1837.
+
+---
+
+## Hyperparameter Optimisation
+
+### Acquisition Function Selection
+
+The most consequential hyperparameter is the **acquisition function** — the
+decision rule that determines where to query next. Each function uses a
+different strategy based on its observed behaviour:
+
+| Function | Acquisition | $$\kappa$$ / Setting | Rationale |
+|----------|-------------|----------------------|-----------|
+| F1 | Localised EI | Box: $$x_1 \in [0.694, 0.714]$$, $$x_2 \in [0.706, 0.726]$$ | GP cannot model near-singular peak globally; constrain search to known peak neighbourhood |
+| F2 | UCB | $$\kappa = 0.8$$ | Exploit confirmed best at $$(0.697, 0.321)$$; reduced from 3.0 after W9 catastrophic exploration |
+| F3 | UCB | $$\kappa = 2.0$$ | Moderate exploration; boundary regions repeatedly unproductive |
+| F4 | EI | $$f^* = +0.566$$ | Exploit W11 Thompson Sampling breakthrough |
+| F5 | Hard override | $$(0.995, 0.995, 0.995, 0.995)$$ | True optimum confirmed at $$(1,1,1,1)$$; EI cannot propose beyond boundary |
+| F6 | EI | $$f^* = -0.181$$ | Three consecutive Thompson Sampling regressions; revert to exploitation |
+| F7 | EI | $$f^* = 3.011$$ | Consistent improvement; unchanged since W5 |
+| F8 | TuRBO | TR length: 0.4, success/failure tol: 3/4 | 8D global GP unreliable; trust-region BO with Thompson Sampling |
+
+### UCB $$\kappa$$ Evolution for F2
+
+| Week | $$\kappa$$ | Rationale |
+|------|-----------|-----------|
+| W5–W8 | 3.0 | Initial uniform setting |
+| W9 | 3.0 | Sent query to $$(0.957, 0.997)$$ → output 0.057 (catastrophic) |
+| W10–W11 | 1.0 | Reduced after W9 failure |
+| W12–W13 | 0.8 | Further reduction for final exploitation |
+
+### TuRBO Hyperparameters (F8)
+
+```python
+TURBO_LENGTH_INIT    = 0.4   # Initial trust region side length
+TURBO_LENGTH_MIN     = 0.01  # Minimum before restart
+TURBO_LENGTH_MAX     = 1.6   # Maximum
+TURBO_SUCCESS_TOL    = 3     # Consecutive successes before expanding
+TURBO_FAILURE_TOL    = 4     # Consecutive failures before shrinking
+TURBO_SUCCESS_FACTOR = 2.0   # Expansion multiplier
+TURBO_FAILURE_FACTOR = 0.5   # Contraction multiplier
+```
+
+### Noise Floor Constraints
+
+Per-function noise constraints prevent the GP from absorbing genuine signal as
+observation noise, which would flatten the posterior and suppress acquisition
+peaks:
+
+```python
+NOISE_CONSTRAINT = {
+    1: Interval(1e-6, 1e-3),  # Tight — sharp F1
+    4: Interval(1e-5, 1e-2),  # Tight — jagged F4
+    # All others: Interval(1e-5, 1e-1)  — moderate
+}
+```
+
+---
+
+## Results
+
+### All-Time Best Outputs — Final Capstone Record
+
+| Function | Initial Best | Final Best | Improvement | Best Strategy | Week |
+|----------|-------------|------------|-------------|---------------|------|
+| F1 | $$7.71\times10^{-16}$$ | $$1.81\times10^{-9}$$ | +7 orders of magnitude | Manual bisection | W2 |
+| F2 | $$0.611$$ | $$0.814$$ | **+33.1%** | UCB κ=0.8 | W13 |
+| F3 | $$-0.035$$ | $$-0.035$$ | 0% — unbeaten | Initial data | — |
+| F4 | $$-4.026$$ | $$+0.566$$ | **+114%** | Thompson Sampling | W11 |
+| F5 | $$64.4$$ | $$8662.5$$ | **+134×** | UCB κ=1000 boundary | W8 |
+| F6 | $$-0.714$$ | $$-0.108$$ | **+84.9%** | EI final round | W13 |
+| F7 | $$1.365$$ | $$3.056$$ | **+124%** | EI low-$$x_1$$/$$x_2$$ | W13 |
+| F8 | $$7.399$$ | $$9.967$$ | **+34.7%** | TuRBO | W12 |
+
+**7 out of 8 functions improved substantially. F3 is the sole exception.**
+
+### Key Findings
+
+**Function 5 — Boundary discovery:** The true optimum lies at the corner
+$$(1,1,1,1)$$ of the input space, yielding 8,662 — 134× the initial best.
+This was discovered by setting UCB $$\kappa = 1000$$ (extreme exploration)
+in Week 5, which drove the acquisition to the boundary. No amount of interior
+exploitation would have found this.
+
+**Function 7 — Consistent improvement:** F7 improved in 6 of 13 rounds —
+the most consistent trajectory in the project. The ARD kernel identified that
+very low $$x_1$$ and $$x_2$$ drive performance; EI exploited this signal
+reliably from Week 5 onward.
+
+**Function 4 — Stochastic breakthrough:** Thompson Sampling discovered a
+positive-valued region $$(+0.566)$$ in Week 11 after 10 rounds of negative
+outputs — the first positive result ever recorded for F4. No deterministic
+strategy had found this region.
+
+**Function 1 — Persistent challenge:** The all-time best ($$1.81\times10^{-9}$$)
+was set by manual bisection in Week 2 and was never surpassed. The GP's smooth
+Matérn kernel is fundamentally mismatched to F1's near-singular peak structure.
+This is the project's most instructive failure: surrogate model mismatch is the
+dominant failure mode in black-box optimisation.
+
+**Function 3 — Unbeaten initial data:** The original dataset's best point
+$$(0.492581, 0.611593, 0.340176)$$ with output $$-0.034835$$ was never improved
+upon across 13 weeks of querying. The GP consistently identified boundary regions
+as promising when the true optimum was an interior point.
+
+### Strategy Evolution Summary
+
+| Phase | Weeks | Approach | Key Outcome |
+|-------|-------|----------|-------------|
+| Manual heuristics | 1–4 | Weighted interpolation, bisection | F1 best set (W2); F6 improved |
+| Uniform GP/UCB | 5–8 | Single pipeline, function-specific κ | F4: −4.03→−0.12; F5: 64→8662 |
+| Bespoke pipeline | 9–13 | Per-function acquisition + kernel | F2, F6, F7, F8 new bests in final rounds |
+
+---
+
+## Contact Details
+
+**Author:** Andreia Bento e Silva
+**Email:** [abilsilv@ic.ac.uk](mailto:abilsilv@ic.ac.uk)
+**Institution:** Imperial College Business School
+**Repository:** [github.com/andreia-bs/Capstone-project](https://github.com/andreia-bs/Capstone-project/tree/main)
